@@ -49,9 +49,3 @@ A **Arquitetura Orientada a Eventos (EDA)** atua na comunicação assíncrona, i
 * **Event Sourcing** na preservação do histórico de auditoria (com destruição criptográfica de chaves para expurgo LGPD);
 * **Pipes and Filters** no pipeline de higienização e envio de notificações sanitárias;
 * **Serverless** para tarefas intermitentes de expurgo e consolidação de relatórios.
-
----
-
-## Referências
-* ABREU, Douglas Henrique Siqueira. *Estilos Arquiteturais de Software: guia de consulta*. 2026. Capítulos 2 a 16 e Apêndice A.
-* ABREU, Douglas Henrique Siqueira. *Um problema, cinco realidades: projeto de arquitetura sob restrição*. PUC-Campinas, 2026. Caso 2: Saúde e Envelope E.
