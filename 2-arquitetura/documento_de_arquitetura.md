@@ -1,6 +1,8 @@
 # 1. Diagramas C4:
 
 ## 1.1 Nível 1: Diagrama de Contexto
+O Diagrama de Contexto estabelece as fronteiras do **Sistema Municipal de Saúde** no ecossistema da administração pública local e federal. Apresenta os atores humanos que interagem diretamente com a plataforma e os sistemas externos que consomem ou fornecem dados essenciais para a operação contínua do município.
+
 ```mermaid
 C4Context
     title Diagrama de Contexto - Rede Municipal de Atenção à Saúde (Envelope E)
@@ -21,7 +23,22 @@ C4Context
     Rel(sistemaSaude, sistemaLegado, "Sincroniza solicitações de leitos/exames", "HTTPS / REST / Chamada")
     Rel(sistemaSaude, ministerioSaude, "Transmite notificações e lotes RNDS", "HTTPS / mTLS / Evento")
 ```
+### 1.1.1 Descrição dos atores e interações do contexto: 
+- Cidadão / Paciente: Usuário final da rede pública de saúde municipal. Interage através de aplicações web/móveis para agendamento e acompanhamento de consultas, verificação do status em filas de regulação, histórico de imunizações e requisição formal de direitos previstos pela LGPD, tais como o acesso aos seus dados e a revogação de consentimento com solicitação de expurgo.
+- Profissional de Saúde (Médicos, Enfermeiros, Triadores e Farmacêuticos): Operadores primários do sistema nas Unidades Básicas de Saúde (UBSs), Unidades de Pronto Atendimento (UPAs) e Hospitais Municipais. Realizam o acolhimento com classificação de risco (Protocolo de Manchester), preenchimento do Prontuário Eletrônico do Paciente (PEP), emissão de prescrições e registros de dispensação de fármacos.
+- Auditor do Órgão Regulador: Agente responsável pela fiscalização da qualidade dos serviços prestados, cumprimento dos tempos regulamentares de atendimento nas emergências, verificação de integridade dos registros de prontuários e auditoria contínua das Notificações Compulsórias enviadas ao Ministério da Saúde.
+- Sistema Legado de Regulação: Plataforma histórica utilizada pelo município para controle e distribuição de vagas em leitos hospitalares e procedimentos especializados. Será mantida em produção por um período de transição obrigatório de 24 meses até o completo estrangulamento de suas rotinas.
+- Sistemas Federais / Ministério da Saúde (e-SUS / RNDS): Infraestrutura nacional centralizadora da Rede Nacional de Dados em Saúde (RNDS). O sistema municipal deve integrar-se obrigatoriamente para descarregar Notificações Compulsórias epidemiológicas no prazo máximo de 24 horas via conexões autenticadas por certificado digital de servidor (mTLS).
+
+### 1.1.2 Análise das fronteiras e requisitos de negócio do contexto:
+O ecossistema opera sob extrema pressão de conformidade regulatória e restrições de infraestrutura local:
+1. Resiliência de Rede: As 70 UBSs municipais passam por quedas frequentes de conectividade. O sistema precisa absorver atendimentos locais sem interromper a operação primária dos profissionais de saúde.
+2. Dupla Tutela Legal: Conflito entre a exigência de guarda dos registros sanitários e trilhas de auditoria por 20 anos pelo Conselho Federal de Medicina (CFM) e Ministério da Saúde contra o direito ao esquecimento e anonimização previstos na LGPD.
+3. Escalabilidade Sazonal: Elevação exponencial no volume de acessos simultâneos durante campanhas sazonais de vacinação municipal sem comprometer os módulos transacionais de emergência das UPAs.
+
 ## 1.2 Nível 2: Diagrama de Contêineres
+O Diagrama de Contêineres detalha as escolhas de tecnologias, limites de execução, bancos de dados e barramentos de comunicação assíncrona que compõem a solução em nuvem e a camada de integração local.
+
 ```mermaid
 C4Container
     title Diagrama de Contêineres - Sistema Municipal de Saúde
@@ -63,7 +80,19 @@ C4Container
     Rel(serverlessWorker, dbKMS, "Revoga/destrói chaves do paciente (LGPD)", "API / Chamada")
     Rel(coreMonolith, sistemaLegado, "Integração temporária (2 anos)", "HTTP / Chamada")
 ```
+### 1.2.1 Análise dos contêineres e fronteiras de comunicação:
+- Portal Web / SPA (Progressive Web App - React): Interface enriquecida desenvolvida para rodar em navegadores modernos. Incorpora estratégia Offline-First por meio de Service Workers e persistência em IndexedDB, permitindo a gravação local de consultas e triagens nas 70 UBSs afetadas por perdas prolongadas de internet.
+- API Gateway / Ingress Controller (Envoy / NGINX): Ponto de entrada unificado no cluster da nuvem. Executa inspeção de segurança, encerramento TLS, autenticação baseada em tokens JWT/OAuth2, controle de taxa (Rate Limiting) e roteamento de tráfego.
+- Núcleo Modular (Monolito Modular - Java / Spring Boot): Aplicação principal que encapsula os domínios de negócio essenciais (Prontuário Eletrônico, Regulação de Leitos, Farmácia e Agendamento). Oferece máxima performance através de chamadas síncronas em memória (In-Process) entre seus módulos internos.
+- Barramento de Eventos (Apache Kafka / RabbitMQ): Plataforma de mensageria assíncrona com alta taxa de transferência e garantia de entrega at-least-once. Isola as requisições de atendimento clínico da carga pesada de auditoria, notificações federais e expurgos.
+- Serviço de Event Sourcing / Auditoria (Go / Node.js): Microserviço dedicado ao consumo contínuo da fila de auditoria. Processa os eventos e realiza a gravação em lote (bulk insert) no repositório imutável.
+- Pipeline Worker (Python / Go - Pipes & Filters): Processador assíncrono projetado no padrão Pipes & Filters. Executa etapas sequenciais de validação de esquemas FHIR, anonimização de payloads e envio com retentativas configuráveis para os webservices federais.
+- Serverless Worker (AWS Lambda / Cloud Functions): Funções nativas em nuvem ativadas por eventos específicos de solicitação de revogação de consentimento LGPD. Interagem diretamente com o KMS para efetuar o expurgo criptográfico das chaves de cifragem.
+- Bancos de Dados Segregados (PostgreSQL / EventStoreDB / KMS): Tripla camada de dados que separa o estado operacional síncrono (OLTP), a trilha imutável append-only de 20 anos e a gestão criptográfica de chaves de pacientes.
+
 ## 1.3 Nível 3: Diagrama de Componentes
+O Diagrama de Componentes detalha a estrutura interna do Núcleo Modular (Monolito Modular), demonstrando como os princípios da Arquitetura Hexagonal (Ports & Adapters) garantem o isolamento dos domínios clínicos em relação aos detalhes de infraestrutura, bancos de dados e sistemas externos.
+
 ```mermaid
 C4Component
     title Diagrama de Componentes - Núcleo Modular (Monolito Modular / Hexagonal)
@@ -91,6 +120,13 @@ C4Component
     
     Rel(auditAdapter, eventBus, "Dispara evento para fila de auditoria imutável", "AMQP / Fila / Evento")
 ```
+### 1.3.1 Detalhamento da arquitetura hexagonal e modularidade:
+- Módulo de Prontuário Eletrônico: Encapsula as regras de domínio clínico (anamnese, evolução médica, diagnóstico ICD e prescrição). Para impedir o vazamento de dados sensíveis e atender à LGPD, delega a cifragem de informações pessoais identificáveis (PII) ao cryptoAdapter antes da gravação no banco operacional.
+- Módulo de Regulação de Leitos: Responsável pelo gerenciamento das solicitações de reserva, transferência e internação. Coordena o bloqueio transacional de leitos e aciona o legadoAdapter para manter a paridade com o sistema legado durante a fase de transição de 24 meses.
+- Módulo de Farmácia & Dispensação: Gerencia o estoque de medicamentos nas unidades e valida a liberação de fármacos mediante apresentação de receita médica válida integrada ao prontuário.
+- Adaptador de Auditoria (auditAdapter): Porta de saída hexagonal responsável por capturar interceptações AOP (Aspect-Oriented Programming) nas rotinas do sistema. Empacota contexto de execução (médico, paciente, ação e IP) e agenda o envio para o Barramento de Eventos sem impactar o fluxo do usuário.
+- Adaptador do Sistema Legado (legadoAdapter): Camada de Anticorrupção (Anti-Corruption Layer - ACL) que converte os comandos modernos de regulação de leitos em requisições REST/JSON para os endpoints da aplicação antiga.
+- Adaptador de Criptografia LGPD (cryptoAdapter): Intermedeia as operações entre os módulos de domínio e o KMS. Gerencia o cache local seguro de chaves DEK para otimizar operações repetitivas de decifragem durante consultas clínicas.
 
 # 2. Mapa de restrições e decisões:
 
@@ -103,6 +139,12 @@ C4Component
 | **Equipe Reduzida (15 devs e 1 auditor/conformidade)** | **Composição Híbrida centrada em Monolito Modular Hexagonal** | Evita a complexidade de dezenas de microsserviços, mantendo isolamento de domínios dentro do mesmo processo. |
 | **Manutenção do Sistema Legado por 2 Anos** | **Padrão *Adapter* / *Strangler Fig* via Arquitetura Hexagonal** | Isola o legado da nova arquitetura, permitindo substituição progressiva e desligamento em 24 meses sem parar o serviço. |
 | **Picos de Acesso em Campanhas Sazonais de Vacinação** | **Extração do Módulo de Agendamento em Serviços Elasticamente Escaláveis** | Permite responder a picos de tráfego pontuais sem redimensionar todo o ecossistema. |
+
+### 2.1 Análise aprofundada da composição híbrida e trade-offs:
+A definição do estilo arquitetural híbrido responde diretamente ao cenário de restrição orçamentária e operacional de um município de médio/grande porte:
+1. Trade-off de Complexidade vs. Autonomia: A adoção de microserviços granulares exigiria uma infraestrutura complexa de observabilidade (Tracing Distribuído, Service Mesh, Centralização de Logs) inviável para uma equipe de 15 desenvolvedores. O Monolito Modular centraliza a implantação enquanto mantém o isolamento dos domínios em código.
+2. Segregação do Processamento Intensivo: Processos com características distintas (como a ingestão assíncrona de audit trails e o processamento em lote de notificações federais) foram removidos do monolito e alocados em contêineres e workers especializados.
+3. Resiliência e Desempenho Regional: Ao delegar a resiliência à aplicação cliente (PWA / Offline-First), o município neutraliza o impacto das falhas nas operadoras locais de telecomunicações sobre a operação das 70 UBSs.
 
 # 3. ADRs:
 ---
