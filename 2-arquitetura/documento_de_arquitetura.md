@@ -189,7 +189,7 @@ C4Component
 
 ---
 
-## 4. Respostas às Perguntas Obrigatórias do Caso:
+# 4. Respostas às Perguntas Obrigatórias do Caso:
 
 ### 1. Como a UPA continua triando e atendendo com a internet fora do ar, e o que acontece quando ela volta?
 
