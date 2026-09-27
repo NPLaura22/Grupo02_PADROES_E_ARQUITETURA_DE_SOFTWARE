@@ -1,0 +1,8 @@
+1. Falha na transação: viagem e outbox revertidas juntas.
+2. Rede fora: 3 viagens confirmadas, 3 eventos pendentes, 0 auditados.
+3. ACK perdido: 1 evento auditado; entrega continua pendente.
+4. Após reinício: 2 novos, 1 repetido ignorado; 3 eventos únicos.
+5. Mesmo ID com conteúdo diferente: rejeitado.
+6. Alteração e exclusão de eventos: bloqueadas.
+7. Replay sem estado operacional: A = R$ 10,50; B = R$ 5,50.
+OK: repasse reconstruído sem perda ou duplicação nos cenários testados.
