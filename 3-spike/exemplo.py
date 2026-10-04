@@ -1,7 +1,11 @@
-"""Grupo 5 — Ônibus / E: prova da segregação assíncrona do ADR 05.
+"""Grupo 02 — Saúde / Envelope E: prova do ADR 05 (segregação assíncrona).
 
-SQLite simula os dois bancos; a chamada de entrega simula o barramento.
-Valores são centavos e datas/regras são fixas para permitir replay exato.
+O banco transacional central e o store imutável de auditoria são bancos
+separados. O atendimento nunca espera a auditoria: o evento sai por uma
+outbox e chega ao store com entrega "ao menos uma vez" + consumidor idempotente.
+
+SQLite simula os dois bancos; a função entregar() simula o barramento (Kafka).
+Dados fixos e sem relógio, para permitir replay exato.
 """
 
 import json
@@ -18,9 +22,9 @@ def abrir_bancos(pasta):
     central = sqlite3.connect(pasta / "central.db")
     auditoria = sqlite3.connect(pasta / "auditoria.db")
     central.executescript("""
-        CREATE TABLE IF NOT EXISTS viagens (
-            id TEXT PRIMARY KEY, operadora TEXT NOT NULL,
-            data TEXT NOT NULL, regra TEXT NOT NULL, centavos INTEGER NOT NULL
+        CREATE TABLE IF NOT EXISTS atendimentos (
+            id TEXT PRIMARY KEY, unidade TEXT NOT NULL,
+            paciente TEXT NOT NULL, acao TEXT NOT NULL, data TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS outbox (
             id TEXT PRIMARY KEY, evento TEXT NOT NULL,
@@ -43,15 +47,15 @@ def abrir_bancos(pasta):
     return central, auditoria
 
 
-def registrar(central, identificador, operadora, data, regra, centavos,
+def registrar(central, identificador, unidade, paciente, acao, data,
               falhar=False):
-    """Núcleo e adaptador: viagem e intenção de publicar na mesma transação."""
-    evento = json.dumps(dict(id=identificador, operadora=operadora,
-                             data=data, regra=regra, centavos=centavos),
+    """Núcleo: atendimento e intenção de publicar na MESMA transação."""
+    evento = json.dumps(dict(id=identificador, unidade=unidade,
+                             paciente=paciente, acao=acao, data=data),
                         sort_keys=True)
     with central:
-        central.execute("INSERT INTO viagens VALUES (?, ?, ?, ?, ?)",
-                        (identificador, operadora, data, regra, centavos))
+        central.execute("INSERT INTO atendimentos VALUES (?, ?, ?, ?, ?)",
+                        (identificador, unidade, paciente, acao, data))
         if falhar:
             raise FalhaSimulada("falha antes de gravar a outbox")
         central.execute("INSERT INTO outbox (id, evento) VALUES (?, ?)",
@@ -74,7 +78,7 @@ def consumir(auditoria, identificador, evento):
 
 
 def entregar(central, auditoria, rede=True, perder_ack=False):
-    """Relay/barramento mínimo: entrega ao menos uma vez, ACK após commit."""
+    """Relay/barramento mínimo: entrega ao menos uma vez, ACK após o commit."""
     if not rede:
         raise FalhaSimulada("barramento indisponível")
     novos = repetidos = 0
@@ -99,36 +103,36 @@ def quantidade(banco, tabela):
     return banco.execute(f"SELECT COUNT(*) FROM {tabela}").fetchone()[0]
 
 
-def reconstruir(auditoria):
-    """Projeção descartável: usa o valor e a regra históricos, sem saldo atual."""
-    totais = {}
-    for (conteudo,) in auditoria.execute("SELECT evento FROM eventos ORDER BY id"):
-        evento = json.loads(conteudo)
-        operadora = evento["operadora"]
-        totais[operadora] = totais.get(operadora, 0) + evento["centavos"]
-    return totais
+def linha_do_tempo(eventos):
+    """Visão do auditor: histórico por paciente, na ordem dos eventos."""
+    historico = {}
+    for conteudo in eventos:
+        e = json.loads(conteudo)
+        historico.setdefault(e["paciente"], []).append(
+            f'{e["data"]} {e["unidade"]} {e["acao"]}')
+    return historico
 
 
 def executar(pasta):
     central, auditoria = abrir_bancos(pasta)
     try:
-        registrar(central, "v00", "A", "2026-09-01", "tarifa-v1", 500,
+        registrar(central, "a00", "UPA-1", "p-001", "triagem", "2026-10-01",
                   falhar=True)
     except FalhaSimulada:
         pass
-    assert quantidade(central, "viagens") == quantidade(central, "outbox") == 0
-    print("1. Falha na transação: viagem e outbox revertidas juntas.")
+    assert quantidade(central, "atendimentos") == quantidade(central, "outbox") == 0
+    print("1. Falha na transação: atendimento e outbox revertidos juntos.")
 
-    registrar(central, "v01", "A", "2026-09-01", "tarifa-v1", 500)
-    registrar(central, "v02", "A", "2026-09-16", "tarifa-v2", 550)
-    registrar(central, "v03", "B", "2026-09-17", "tarifa-v2", 550)
+    registrar(central, "a01", "UPA-1", "p-001", "triagem", "2026-10-01")
+    registrar(central, "a02", "UPA-1", "p-002", "triagem", "2026-10-02")
+    registrar(central, "a03", "UBS-12", "p-001", "prescricao", "2026-10-03")
     try:
         entregar(central, auditoria, rede=False)
     except FalhaSimulada:
         pass
-    assert quantidade(central, "viagens") == quantidade(central, "outbox") == 3
+    assert quantidade(central, "atendimentos") == quantidade(central, "outbox") == 3
     assert quantidade(auditoria, "eventos") == 0
-    print("2. Rede fora: 3 viagens confirmadas, 3 eventos pendentes, 0 auditados.")
+    print("2. Rede fora: 3 atendimentos confirmados, 3 eventos pendentes, 0 auditados.")
 
     try:
         entregar(central, auditoria, perder_ack=True)
@@ -147,16 +151,17 @@ def executar(pasta):
     assert central.execute("SELECT SUM(entregue) FROM outbox").fetchone()[0] == 3
     print("4. Após reinício: 2 novos, 1 repetido ignorado; 3 eventos únicos.")
 
-    original = auditoria.execute("SELECT evento FROM eventos WHERE id = 'v01'").fetchone()[0]
+    original = auditoria.execute(
+        "SELECT evento FROM eventos WHERE id = 'a01'").fetchone()[0]
     try:
-        consumir(auditoria, "v01", original.replace('500', '999'))
+        consumir(auditoria, "a01", original.replace("triagem", "alterada"))
     except ValueError:
         print("5. Mesmo ID com conteúdo diferente: rejeitado.")
     else:
         raise AssertionError("Conflito de conteúdo deveria ser rejeitado")
 
-    for comando in ("UPDATE eventos SET evento = '{}' WHERE id = 'v01'",
-                    "DELETE FROM eventos WHERE id = 'v01'"):
+    for comando in ("UPDATE eventos SET evento = '{}' WHERE id = 'a01'",
+                    "DELETE FROM eventos WHERE id = 'a01'"):
         try:
             with auditoria:
                 auditoria.execute(comando)
@@ -166,21 +171,27 @@ def executar(pasta):
             raise AssertionError("Mutação da auditoria deveria ser rejeitada")
     print("6. Alteração e exclusão de eventos: bloqueadas.")
 
-    esperado = dict(central.execute(
-        "SELECT operadora, SUM(centavos) FROM viagens GROUP BY operadora"
-    ))
-    assert esperado == {"A": 1050, "B": 550}
+    esperado = linha_do_tempo(
+        e for (e,) in central.execute(
+            "SELECT evento FROM outbox ORDER BY id"))
     with central:
-        central.execute("DELETE FROM viagens")
-    assert quantidade(central, "viagens") == 0
-    assert reconstruir(auditoria) == esperado
-    assert reconstruir(auditoria) == esperado
-    print("7. Replay sem estado operacional: A = R$ 10,50; B = R$ 5,50.")
-    print("OK: repasse reconstruído sem perda ou duplicação nos cenários testados.")
+        central.execute("DELETE FROM atendimentos")
+        central.execute("DELETE FROM outbox")
+    assert quantidade(central, "atendimentos") == 0
+    reconstruido = linha_do_tempo(
+        e for (e,) in auditoria.execute(
+            "SELECT evento FROM eventos ORDER BY id"))
+    assert reconstruido == esperado
+    assert (len(reconstruido["p-001"]), len(reconstruido["p-002"])) == (2, 1)
+    assert reconstruido == linha_do_tempo(
+        e for (e,) in auditoria.execute(
+            "SELECT evento FROM eventos ORDER BY id"))
+    print("7. Replay sem estado operacional: p-001 = 2 registros; p-002 = 1 registro.")
+    print("OK: histórico reconstruído sem perda ou duplicação nos cenários testados.")
     central.close()
     auditoria.close()
 
 
 if __name__ == "__main__":
-    with TemporaryDirectory(prefix="onibus-spike-") as diretorio:
+    with TemporaryDirectory(prefix="saude-spike-") as diretorio:
         executar(Path(diretorio))
