@@ -1,6 +1,7 @@
 # 1. Diagramas C4:
 
 ## 1.1 Nível 1: Diagrama de Contexto
+
 O Diagrama de Contexto estabelece as fronteiras do **Sistema Municipal de Saúde** no ecossistema da administração pública local e federal. Apresenta os atores humanos que interagem diretamente com a plataforma e os sistemas externos que consomem ou fornecem dados essenciais para a operação contínua do município.
 
 ```mermaid
@@ -37,58 +38,63 @@ O ecossistema opera sob extrema pressão de conformidade regulatória e restriç
 3. Escalabilidade Sazonal: Elevação exponencial no volume de acessos simultâneos durante campanhas sazonais de vacinação municipal sem comprometer os módulos transacionais de emergência das UPAs.
 
 ## 1.2 Nível 2: Diagrama de Contêineres
-O Diagrama de Contêineres detalha as escolhas de tecnologias, limites de execução, bancos de dados e barramentos de comunicação assíncrona que compõem a solução em nuvem e a camada de integração local.
+
+O Diagrama de Contêineres desagrega o **Sistema Municipal de Saúde** nas suas unidades de implantação, detalhando escolhas de frameworks, protocolos de comunicação, topologia de bancos de dados com Outbox Transacional e barramentos de mensagens.
 
 ```mermaid
 C4Container
-    title Diagrama de Contêineres - Sistema Municipal de Saúde
+    title Diagrama de Contêineres - Sistema Municipal de Saúde (Revisado)
 
     Person(operador, "Usuários (Médicos, Atendentes, Auditores)", "Profissionais de saúde e fiscalização.")
 
     System_Boundary(b1, "Plataforma Municipal de Saúde (Nuvem Pública)") {
-        Container(webApp, "Portal Web / SPA", "React", "Interface para atendimento, regulação e auditoria.")
+        Container(webApp, "Portal Web / SPA (Offline-First)", "React / PWA", "Interface para atendimento com cache local e log encadeado.")
         Container(apiGateway, "API Gateway / Ingress Controller", "Envoy / NGINX", "Autenticação, controle de taxa e roteamento.")
         
-        Container(coreMonolith, "Núcleo Modular (Monolito Modular)", "Java / Spring Boot", "Módulos: Prontuário, Farmácia, Agendamento e Regulação.")
-        Container(eventBus, "Barramento de Eventos / Filas", "Apache Kafka / RabbitMQ", "Transmissão assíncrona de eventos e auditoria.")
+        Container(coreMonolith, "Núcleo Modular (Monolito Modular)", "Java / Spring Boot", "Módulos: Prontuário, Farmácia, Agendamento, Regulação e LGPD.")
+        Container(relayService, "Relay Outbox Worker", "Java / Go", "Lê a Outbox Transacional e publica no Barramento de Eventos.")
+        Container(eventBus, "Barramento de Eventos", "Apache Kafka", "Transmissão assíncrona de eventos, auditoria e notificações.")
         
-        Container(auditService, "Serviço de Event Sourcing / Auditoria", "Go / Node.js", "Ingestão e persistência imutável do histórico de alterações.")
-        Container(pipelineService, "Pipeline Worker (Pipes & Filters)", "Python / Go", "Validação, anonimização e envio de notificações em até 24h.")
-        Container(serverlessWorker, "Serverless Expurgo & Jobs", "AWS Lambda / Cloud Functions", "Processa anonimização e expurgo LGPD via destruição de chave.")
+        Container(auditService, "Serviço de Auditoria", "Go / Node.js", "Ingestão e validação da cadeia de hashes do histórico.")
+        Container(pipelineService, "Pipeline Worker (Pipes & Filters)", "Python / Go", "Validação FHIR, controle de SLA 24h e envio à RNDS.")
+        Container(serverlessWorker, "Serverless KMS Worker", "AWS Lambda / Cloud Functions", "Executa destruição de chaves no KMS mediante evento aprovado.")
 
-        ContainerDb(dbCore, "Banco Transacional Central", "PostgreSQL", "Dados transacionais operacionais e tabelas de mapeamento.")
-        ContainerDb(dbAudit, "Store Imutável de Auditoria", "EventStoreDB / PostgreSQL Append-Only", "Eventos de auditoria e reconstrução histórica de 20 anos.")
-        ContainerDb(dbKMS, "Gerenciador de Chaves (KMS)", "Vault / AWS KMS", "Guarda chaves de criptografia individuais por paciente (LGPD).")
+        ContainerDb(dbCore, "Banco Transacional Central", "PostgreSQL", "Dados operacionais e Tabela de Outbox Transacional.")
+        ContainerDb(dbAudit, "Store Imutável de Auditoria", "PostgreSQL Append-Only + WORM", "Log de auditoria particionado com Object Lock WORM (20 anos).")
+        ContainerDb(dbKMS, "Gerenciador de Chaves (KMS)", "Vault / AWS KMS", "Guarda chaves de criptografia (DEKs) individuais por paciente.")
     }
 
     System_Ext(sistemaLegado, "Sistema Legado de Regulação", "HTTP / REST")
     System_Ext(ministerioSaude, "Ministério da Saúde (RNDS)", "HTTP / mTLS")
 
-    Rel(operador, webApp, "Acessa via navegador", "HTTPS / Fluxo")
-    Rel(webApp, apiGateway, "Requisições de API", "HTTPS / Chamada")
-    Rel(apiGateway, coreMonolith, "Roteia chamadas transacionais", "gRPC / HTTP / Chamada")
+    Rel(operador, webApp, "Acessa via navegador / PWA", "HTTPS / Fluxo")
+    Rel(webApp, apiGateway, "Requisições de API e Sincronização", "HTTPS / Chamada")
+    Rel(apiGateway, coreMonolith, "Roteia chamadas transacionais", "HTTP / Chamada")
     
-    Rel(coreMonolith, dbCore, "Leitura e escrita transacional", "SQL / Chamada")
-    Rel(coreMonolith, eventBus, "Publica eventos de negócio e auditoria", "AMQP / Fila / Evento")
+    Rel(coreMonolith, dbCore, "Escrita transacional e Outbox (Fail-Closed)", "SQL / JDBC")
+    Rel(relayService, dbCore, "Lê eventos pendentes na Outbox", "SQL")
+    Rel(relayService, eventBus, "Publica eventos de negócio e auditoria", "Kafka Protocol")
     
-    Rel(eventBus, auditService, "Consome eventos para histórico de 20 anos", "Fila / Evento")
-    Rel(auditService, dbAudit, "Grava eventos imutáveis", "Append-Only / Chamada")
+    Rel(eventBus, auditService, "Consome eventos para auditoria imutável", "Kafka Event")
+    Rel(auditService, dbAudit, "Persiste com cadeia de hashes diária", "Append-Only SQL")
     
-    Rel(eventBus, pipelineService, "Envia notificações compulsórias", "Fila / Evento")
-    Rel(pipelineService, ministerioSaude, "Transmite dados sanitários em até 24h", "HTTPS / mTLS / Chamada")
+    Rel(eventBus, pipelineService, "Envia notificações compulsórias com relógio de SLA", "Kafka Event")
+    Rel(pipelineService, ministerioSaude, "Transmite dados epidemiológicos em até 24h", "HTTPS / mTLS")
     
-    Rel(serverlessWorker, dbKMS, "Revoga/destrói chaves do paciente (LGPD)", "API / Chamada")
-    Rel(coreMonolith, sistemaLegado, "Integração temporária (2 anos)", "HTTP / Chamada")
+    Rel(eventBus, serverlessWorker, "Consome evento ExpurgoAprovado", "Kafka Event")
+    Rel(serverlessWorker, dbKMS, "Destrói chaves do paciente sob consentimento/vencimento", "KMS API")
+    Rel(coreMonolith, sistemaLegado, "Sincronização temporária por leito (2 anos)", "HTTP / Chamada")
 ```
 ### 1.2.1 Análise dos contêineres e fronteiras de comunicação:
-- Portal Web / SPA (Progressive Web App - React): Interface enriquecida desenvolvida para rodar em navegadores modernos. Incorpora estratégia Offline-First por meio de Service Workers e persistência em IndexedDB, permitindo a gravação local de consultas e triagens nas 70 UBSs afetadas por perdas prolongadas de internet.
+- Portal Web / SPA (Progressive Web App - React): Interface enriquecida desenvolvida para rodar em navegadores modernos. Incorpora estratégia Offline-First com segregação clara: na UBS, realiza cache apenas de pacientes agendados no dia com DEKs de TTL curto; na UPA (demanda espontânea), registra o atendimento corrente em log local encadeado por hash, sincronizando via Relay Local assim que a conexão é reestabelecida.
 - API Gateway / Ingress Controller (Envoy / NGINX): Ponto de entrada unificado no cluster da nuvem. Executa inspeção de segurança, encerramento TLS, autenticação baseada em tokens JWT/OAuth2, controle de taxa (Rate Limiting) e roteamento de tráfego.
-- Núcleo Modular (Monolito Modular - Java / Spring Boot): Aplicação principal que encapsula os domínios de negócio essenciais (Prontuário Eletrônico, Regulação de Leitos, Farmácia e Agendamento). Oferece máxima performance através de chamadas síncronas em memória (In-Process) entre seus módulos internos.
-- Barramento de Eventos (Apache Kafka / RabbitMQ): Plataforma de mensageria assíncrona com alta taxa de transferência e garantia de entrega at-least-once. Isola as requisições de atendimento clínico da carga pesada de auditoria, notificações federais e expurgos.
-- Serviço de Event Sourcing / Auditoria (Go / Node.js): Microserviço dedicado ao consumo contínuo da fila de auditoria. Processa os eventos e realiza a gravação em lote (bulk insert) no repositório imutável.
-- Pipeline Worker (Python / Go - Pipes & Filters): Processador assíncrono projetado no padrão Pipes & Filters. Executa etapas sequenciais de validação de esquemas FHIR, anonimização de payloads e envio com retentativas configuráveis para os webservices federais.
-- Serverless Worker (AWS Lambda / Cloud Functions): Funções nativas em nuvem ativadas por eventos específicos de solicitação de revogação de consentimento LGPD. Interagem diretamente com o KMS para efetuar o expurgo criptográfico das chaves de cifragem.
-- Bancos de Dados Segregados (PostgreSQL / EventStoreDB / KMS): Tripla camada de dados que separa o estado operacional síncrono (OLTP), a trilha imutável append-only de 20 anos e a gestão criptográfica de chaves de pacientes.
+- Núcleo Modular (Monolito Modular - Java / Spring Boot): Aplicação principal que encapsula os domínios de negócio essenciais (Prontuário Eletrônico, Regulação de Leitos, Farmácia, Agendamento e Módulo LGPD). Garantia de consistência e auditoria via Outbox Transacional no mesmo banco de dados.
+- Relay Outbox Worker: Componente responsável por ler a tabela de Outbox do dbCore em intervalos de milissegundos e publicar os eventos de auditoria e negócio no Apache Kafka, eliminando totalmente o risco de Dual Write.
+- Barramento de Eventos (Apache Kafka): Plataforma de mensageria assíncrona com alta taxa de transferência e garantia de entrega at-least-once. Isola as requisições de atendimento clínico da carga pesada de auditoria, notificações federais e destruição de chaves.
+- Serviço de Auditoria (Go / Node.js): Consome eventos do Kafka, calcula a cadeia de hashes por partição diária e grava os registros de auditoria no repositório imutável.
+- Pipeline Worker (Python / Go - Pipes & Filters): Processador assíncrono para validação FHIR e envio epidemiológico à RNDS. Controla o SLA de 24 horas a partir do timestamp do atendimento de origem, emitindo alertas em 12h e acionando contingência manual antes do estouro do prazo.
+- Serverless Worker (AWS Lambda / Cloud Functions): Executor técnico isolado, acionado via evento ExpurgoAprovado. Executa exclusivamente a revogação/destruição de chaves no KMS, sem conter regras de negócio de aprovação.
+- Bancos de Dados Segregados (PostgreSQL / PostgreSQL Append-Only + WORM / KMS): Tripla camada de dados que separa o estado operacional síncrono (OLTP), a trilha imutável protegida por Object Lock WORM e a gestão criptográfica de chaves de pacientes.
 
 ## 1.3 Nível 3: Diagrama de Componentes
 O Diagrama de Componentes detalha a estrutura interna do Núcleo Modular (Monolito Modular), demonstrando como os princípios da Arquitetura Hexagonal (Ports & Adapters) garantem o isolamento dos domínios clínicos em relação aos detalhes de infraestrutura, bancos de dados e sistemas externos.
