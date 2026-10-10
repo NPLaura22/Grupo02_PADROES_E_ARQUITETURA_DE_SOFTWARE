@@ -1,6 +1,4 @@
-# Entrega 1: Matriz de Estilos Aplicada
-
-## 1. Identificação do Cenário e Contexto
+## 1. Identificação do Cenário e Contexto:
 * **Caso:** Grupo 02 — Saúde: Rede Municipal de Atenção à Saúde.
 * **Envelope:** E — Operação sob fiscalização de órgão regulador.
 * **Infraestrutura e Equipe:** Nuvem pública com exigência de trilha de auditoria completa; equipe de 15 desenvolvedores e 1 responsável por conformidade.
@@ -9,7 +7,7 @@
 
 ---
 
-## 2. Matriz de Avaliação dos Doze Estilos Arquiteturais
+## 2. Matriz de Avaliação dos Doze Estilos Arquiteturais:
 
 *(Critérios baseados na Seção 2.3 do livro: desempenho, escalabilidade, disponibilidade, modificabilidade, testabilidade, implantabilidade, segurança e custo).*
 
@@ -30,7 +28,7 @@
 
 ---
 
-## 3. Estilos Descartados como Arquitetura Global (Análise Detalhada)
+## 3. Estilos Descartados como Arquitetura Global (Análise Detalhada):
 
 Para atender ao **Envelope E** mantendo o foco no rigor fiscalatório e no cumprimento da LGPD sem sobrecarregar a equipe de 15 desenvolvedores, os seguintes estilos foram explicitamente descartados como estrutura principal:
 
@@ -41,7 +39,7 @@ Para atender ao **Envelope E** mantendo o foco no rigor fiscalatório e no cumpr
 
 ---
 
-## 4. Síntese Arquitetural
+## 4. Síntese Arquitetural:
 A solução adota como núcleo inicial um **Monolito Modular com Arquitetura Hexagonal**, garantindo transações locais, isolamento do sistema legado de 2 anos e testabilidade sem impor o custo de uma distribuição prematura. 
 
 A **Arquitetura Orientada a Eventos (EDA)** atua na comunicação assíncrona através de uma **Outbox Transacional**, garantindo a ingestão imutável do **Log de Auditoria de Estado Completo** e a integração das UBSs. Para cenários pontuais e específicos, aplicam-se:
