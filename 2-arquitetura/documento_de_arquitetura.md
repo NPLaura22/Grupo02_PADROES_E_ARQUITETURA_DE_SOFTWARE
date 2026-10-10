@@ -97,183 +97,228 @@ C4Container
 - Bancos de Dados Segregados (PostgreSQL / PostgreSQL Append-Only + WORM / KMS): Tripla camada de dados que separa o estado operacional síncrono (OLTP), a trilha imutável protegida por Object Lock WORM e a gestão criptográfica de chaves de pacientes.
 
 ## 1.3 Nível 3: Diagrama de Componentes
-O Diagrama de Componentes detalha a estrutura interna do Núcleo Modular (Monolito Modular), demonstrando como os princípios da Arquitetura Hexagonal (Ports & Adapters) garantem o isolamento dos domínios clínicos em relação aos detalhes de infraestrutura, bancos de dados e sistemas externos.
+
+O Diagrama de Componentes expõe a organização interna do **Núcleo Modular (Monolito Modular)**, demonstrando a aplicação dos princípios de Arquitetura Hexagonal (Ports & Adapters) e a inclusão do Módulo LGPD.
 
 ```mermaid
 C4Component
     title Diagrama de Componentes - Núcleo Modular (Monolito Modular / Hexagonal)
 
     Container_Boundary(c1, "Núcleo Modular (Monolito Modular)") {
-        Component(prontuarioMod, "Módulo de Prontuário Eletrônico", "Spring Component", "Gestão do histórico clínico do paciente.")
+        Component(prontuarioMod, "Módulo de Prontuário Eletrônico", "Spring Component", "Gestão do histórico clínico e gravação de acessos via Outbox.")
         Component(farmaciaMod, "Módulo de Farmácia & Dispensação", "Spring Component", "Controle de estoque e dispensação de medicamentos.")
-        Component(regulacaoMod, "Módulo de Regulação de Leitos", "Spring Component", "Gestão de leitos hospitalares e UPAs.")
+        Component(regulacaoMod, "Módulo de Regulação de Leitos", "Spring Component", "Gestão de leitos com Máquina de Estados e trava curta local.")
+        Component(lgpdMod, "Módulo LGPD & Conformidade", "Spring Component", "Recebe solicitações, valida base legal e exige aprovação humana.")
         
-        Component(auditAdapter, "Adaptador de Auditoria (Porta de Saída)", "Java Hexagonal Port", "Intercepta ações e publica no barramento.")
-        Component(legadoAdapter, "Adaptador do Sistema Legado", "Java Hexagonal Port", "Traduz chamadas para o sistema de regulação antigo.")
-        Component(cryptoAdapter, "Adaptador de Criptografia LGPD", "Java KMS Adapter", "Aplica cifragem envelope com chave individual do paciente.")
+        Component(auditAdapter, "Adaptador de Outbox (Porta de Saída)", "Java Hexagonal Port", "Grava eventos de acesso e mudança na Outbox Transacional.")
+        Component(legadoAdapter, "Adaptador do Sistema Legado", "Java Hexagonal Port", "Traduz chamadas e gerencia transição de autoridade do leito.")
+        Component(cryptoAdapter, "Adaptador de Criptografia LGPD", "Java KMS Adapter", "Aplica cifragem envelope e gerencia cache local de DEKs.")
     }
 
-    ContainerDb(dbCore, "PostgreSQL Transacional", "SQL")
-    Container(eventBus, "Barramento de Eventos", "Kafka")
+    ContainerDb(dbCore, "PostgreSQL Transacional", "SQL / Outbox Table")
     System_Ext(sistemaLegado, "Sistema Legado (2 anos)", "REST API")
 
     Rel(prontuarioMod, cryptoAdapter, "Solicita cifragem/decifragem de PII", "In-Process / Chamada")
-    Rel(prontuarioMod, auditAdapter, "Emite evento de acesso ao prontuário", "In-Process / Evento")
-    Rel(prontuarioMod, dbCore, "Grava atendimento", "JDBC / Chamada")
+    Rel(prontuarioMod, auditAdapter, "Grava log de acesso obrigatoriamente (Fail-Closed)", "In-Process / Chamada")
+    Rel(prontuarioMod, dbCore, "Grava atendimento e evento Outbox na mesma transação", "JDBC / SQL")
 
-    Rel(regulacaoMod, legadoAdapter, "Sincroniza vaga de leito com o legado", "In-Process / Chamada")
-    Rel(legadoAdapter, sistemaLegado, "Sincronização bidirecional", "HTTP / REST / Chamada")
-    
-    Rel(auditAdapter, eventBus, "Dispara evento para fila de auditoria imutável", "AMQP / Fila / Evento")
+    Rel(lgpdMod, auditAdapter, "Publica eventos ExpurgoSolicitado e ExpurgoAprovado", "In-Process / Chamada")
+    Rel(regulacaoMod, legadoAdapter, "Sincroniza leito sob autoridade do legado", "In-Process / Chamada")
+    Rel(legadoAdapter, sistemaLegado, "Requisição com chave de idempotência", "HTTP / REST")
 ```
 ### 1.3.1 Detalhamento da arquitetura hexagonal e modularidade:
-- Módulo de Prontuário Eletrônico: Encapsula as regras de domínio clínico (anamnese, evolução médica, diagnóstico ICD e prescrição). Para impedir o vazamento de dados sensíveis e atender à LGPD, delega a cifragem de informações pessoais identificáveis (PII) ao cryptoAdapter antes da gravação no banco operacional.
-- Módulo de Regulação de Leitos: Responsável pelo gerenciamento das solicitações de reserva, transferência e internação. Coordena o bloqueio transacional de leitos e aciona o legadoAdapter para manter a paridade com o sistema legado durante a fase de transição de 24 meses.
-- Módulo de Farmácia & Dispensação: Gerencia o estoque de medicamentos nas unidades e valida a liberação de fármacos mediante apresentação de receita médica válida integrada ao prontuário.
-- Adaptador de Auditoria (auditAdapter): Porta de saída hexagonal responsável por capturar interceptações AOP (Aspect-Oriented Programming) nas rotinas do sistema. Empacota contexto de execução (médico, paciente, ação e IP) e agenda o envio para o Barramento de Eventos sem impactar o fluxo do usuário.
-- Adaptador do Sistema Legado (legadoAdapter): Camada de Anticorrupção (Anti-Corruption Layer - ACL) que converte os comandos modernos de regulação de leitos em requisições REST/JSON para os endpoints da aplicação antiga.
-- Adaptador de Criptografia LGPD (cryptoAdapter): Intermedeia as operações entre os módulos de domínio e o KMS. Gerencia o cache local seguro de chaves DEK para otimizar operações repetitivas de decifragem durante consultas clínicas.
+- Módulo de Prontuário Eletrônico: Encapsula as regras de domínio clínico (anamnese, evolução médica, diagnóstico ICD e prescrição). Qualquer leitura ou escrita aciona obrigatoriamente o auditAdapter dentro da mesma transação SQL local (Fail-Closed). Se a gravação do registro de acesso na Outbox falhar, a exibição ou alteração do prontuário é abortada.
+- Módulo de Regulação de Leitos: Responsável pelo gerenciamento das solicitações de reserva, transferência e internação. Implementa uma Máquina de Estados explícita (SOLICITADA → PENDENTE_LEGADO → CONFIRMADA/RECUSADA) associada a travas curtas no PostgreSQL local, desacoplando a reserva de leitos da latência HTTP do sistema legado.
+- Módulo de Farmácia & Dispensação: Gerencia o estoque de medicamentos nas unidades e valida a liberação de fármacos mediante apresentação de receita médica válida. Registra eventos de estado completo (medicamento, lote, dose, prescrição de origem) via auditAdapter.
+- Módulo LGPD & Conformidade: Módulo dedicado no núcleo responsável pela recepção de solicitações de titulares de dados. Avalia a Base Legal (indeferindo o expurgo de prontuários sob guarda sanitária obrigatória de 20 anos) e exige a aprovação formal do Encarregado de Dados (DPO) antes de gravar os eventos ExpurgoSolicitado e ExpurgoAprovado na Outbox.
+- Adaptador de Outbox (auditAdapter): Porta de saída hexagonal responsável por gravar registros de auditoria e eventos de domínio na tabela outbox do banco de dados operacional (dbCore), integrando a mesma transação do banco relacional.
+- Adaptador do Sistema Legado (legadoAdapter): Camada de Anticorrupção (Anti-Corruption Layer - ACL) que converte comandos modernos de regulação em requisições REST/JSON para a aplicação antiga enquanto esta detiver a autoridade do leito, utilizando chaves de idempotência.
+- Adaptador de Criptografia LGPD (cryptoAdapter): Intermedeia as operações entre os módulos de domínio e o KMS. Utiliza pseudônimos estáveis para identificar o paciente na trilha de auditoria sem expor seus dados PII diretos e gerencia o cache local seguro de chaves DEK.
 
-# 2. Mapa de restrições e decisões:
+# 2. Mapa de Restrições e Decisões:
 
-| Restrição do Envelope / Requisito do Caso | Decisão Arquitetural Adotada | Justificativa & Impacto |
+A tabela a seguir apresenta o alinhamento sistemático entre as restrições do Envelope E e as decisões arquiteturais consolidadas após a leitura cruzada:
+
+| Restrição do Envelope / Requisito do Caso | Decisão Arquitetural Adotada | Justificativa & Impacto Técnico / Operacional |
 | :--- | :--- | :--- |
-| **Fiscalização por Órgão Regulador e Guarda de 20 Anos** | **Event Sourcing na Trilha de Auditoria com Store Imutável Segregado** | Garante imutabilidade absoluta e reconstrução histórica das alterações operacionais sem sobrecarregar o banco OLTP. |
-| **Direito ao Esquecimento / Expurgo LGPD vs. Imutabilidade da Trilha** | **Criptografia Envelope com Destruição Criptográfica de Chaves (*Crypto-shredding*)** | Dados PII são cifrados com chave individual mantida no KMS. Ao revogar o consentimento, a chave é destruída, tornando o dado ilegível na base imutável. |
-| **Notificações Compulsórias em até 24h** | **Pipeline em Dutos e Filtros (*Pipes & Filters*) com Filas Assíncronas** | Garante validação, anonimização e retentativas automáticas no envio ao Ministério da Saúde (RNDS) sem bloquear o atendimento da UPA. |
-| **70 UBSs com Conectividade Instável** | **Arquitetura Offline-First com Buffer Local (*Store and Forward*)** | Permite registrar atendimentos localmente (IndexedDB/SQLite local) e descarregar no barramento central quando a conexão retorna. |
-| **Equipe Reduzida (15 devs e 1 auditor/conformidade)** | **Composição Híbrida centrada em Monolito Modular Hexagonal** | Evita a complexidade de dezenas de microsserviços, mantendo isolamento de domínios dentro do mesmo processo. |
-| **Manutenção do Sistema Legado por 2 Anos** | **Padrão *Adapter* / *Strangler Fig* via Arquitetura Hexagonal** | Isola o legado da nova arquitetura, permitindo substituição progressiva e desligamento em 24 meses sem parar o serviço. |
-| **Picos de Acesso em Campanhas Sazonais de Vacinação** | **Extração do Módulo de Agendamento em Serviços Elasticamente Escaláveis** | Permite responder a picos de tráfego pontuais sem redimensionar todo o ecossistema. |
+| **Fiscalização por Órgão Regulador e Guarda de 20 Anos** | **Log de Auditoria de Estado Completo via Outbox Transacional e WORM** | Garante reconstrução histórica sem *Dual Write*. Os eventos são gravados na Outbox do banco transacional, publicados no Kafka e armazenados em PostgreSQL Particionado com Object Lock WORM e cadeia de hashes. |
+| **Direito ao Esquecimento / Expurgo LGPD vs. Imutabilidade da Trilha** | **Segregação por Base Legal e Criptografia Envelope com *Crypto-shredding*** | Dados sob obrigação legal (prontuários por 20 anos) não sofrem expurgo (Art. 16, I da LGPD). O *crypto-shredding* é aplicado apenas a dados por consentimento e ao fim do prazo de 20 anos. A trilha usa pseudônimos estáveis para manter a auditabilidade. |
+| **Notificações Compulsórias em até 24h** | **Pipeline em Dutos e Filtros (*Pipes & Filters*) com Relógio de SLA** | O pipeline valida schemas FHIR e controla o SLA de 24h a partir do *timestamp* do atendimento de origem, com alertas em 12h e contingência manual. A anonimização foi removida para garantir a identificação pela vigilância. |
+| **70 UBSs com Conectividade Instável** | **Arquitetura Offline-First Segregada com Log Encadeado Local** | A UBS faz cache apenas dos agendados do dia (DEKs com TTL curto). A UPA registra atendimentos espontâneos em log local encadeado por hash e sincroniza ao reconectar, sem pré-carga de prontuários. |
+| **Equipe Reduzida (15 devs e 1 auditor/conformidade)** | **Composição Híbrida centrada em Monolito Modular Hexagonal** | Evita a complexidade operacional de microsserviços. Concentra as regras de negócio e aprovação LGPD no núcleo monolítico e utiliza PostgreSQL Particionado para simplificar a operação. |
+| **Manutenção do Sistema Legado por 2 Anos** | **Máquina de Estados e Decoupling Transacional (ADR 06)** | Elimina travas de banco retidas durante chamadas HTTP. A disputa de leitos é resolvida por transações curtas no banco local e a sincronização com o legado ocorre via estados assíncronos reconciliados. |
+| **Picos de Acesso em Campanhas Sazonais de Vacinação** | **Manutenção no Núcleo Modular com Previsão de Extração Isolada** | O agendamento permanece no monolito. Caso haja necessidade comprovada de escala durante eventos de massa, o módulo pode ser implantado isoladamente sem alterar o domínio. |
 
-### 2.1 Análise aprofundada da composição híbrida e trade-offs:
+---
+
+### 2.1 Análise Aprofundada da Composição Híbrida e Trade-offs
+
 A definição do estilo arquitetural híbrido responde diretamente ao cenário de restrição orçamentária e operacional de um município de médio/grande porte:
-1. Trade-off de Complexidade vs. Autonomia: A adoção de microserviços granulares exigiria uma infraestrutura complexa de observabilidade (Tracing Distribuído, Service Mesh, Centralização de Logs) inviável para uma equipe de 15 desenvolvedores. O Monolito Modular centraliza a implantação enquanto mantém o isolamento dos domínios em código.
-2. Segregação do Processamento Intensivo: Processos com características distintas (como a ingestão assíncrona de audit trails e o processamento em lote de notificações federais) foram removidos do monolito e alocados em contêineres e workers especializados.
-3. Resiliência e Desempenho Regional: Ao delegar a resiliência à aplicação cliente (PWA / Offline-First), o município neutraliza o impacto das falhas nas operadoras locais de telecomunicações sobre a operação das 70 UBSs.
 
-# 3. ADRs:
+1. **Garantia de Não-Repúdio sem Dual Write:** A adoção do padrão *Transactional Outbox* garante que 100% das leituras e escritas em prontuários sejam auditadas. Se o banco relacional persistir o atendimento, persiste também o evento de auditoria no mesmo *commit*.
+2. **Segregação de Privilégios no Expurgo:** O Módulo LGPD no monolito concentra a validação legal e aprovação humana do Encarregado de Dados. O *Serverless Worker* atua como mero executor sem privilégios de regra de negócio, invocando o KMS para destruir a chave.
+3. **Resiliência e Desempenho Regional:** Ao limitar o cache offline da UBS aos pacientes agendados e proibir a pré-carga de histórico na UPA, elimina-se o risco de vazamento de prontuários em navegadores locais.
+
+# 3. Registros de Decisão Arquitetural (ADRs):
+
 ---
 
 ### ADR 01: Estrutura Geral – Composição Híbrida com Núcleo Monolítico Modular e Fronteiras Explícitas
 
 * **Status:** Aprovado
-* **Contexto:** A equipa de desenvolvimento possui apenas 15 pessoas e 1 especialista em conformidade. Adotar microsserviços puros traria alta complexidade operacional. Contudo, partes do sistema exigem modelos de execução distintos (processamento em tempo real vs. assíncrono vs. execução orientada a eventos por demanda)[cite: 6].
-* **Decisão:** Adotar uma composição híbrida de estilos arquiteturais, definindo rigidamente as seguintes fronteiras[cite: 6]:
-  1. **Núcleo Transacional (Monolito Modular com Arquitetura Hexagonal):** Cobre os domínios core (Prontuário, Farmácia, Regulação e Agendamento). Comunicação interna *In-Process* síncrona.
-  2. **Fronteira Assíncrona via EDA (Event-Driven Architecture):** Delimitada na saída do Monolito através de Portas/Adaptadores que publicam eventos no Barramento de Eventos (Kafka)[cite: 6].
-  3. **Fronteira de Processamento de Dados (Pipes & Filters):** Executada por um Worker separado responsável pela ingestão e transmissão assíncrona ao Ministério da Saúde[cite: 6].
-  4. **Fronteira Serverless:** Execuções pontuais de expurgo LGPD disparadas via eventos/crons[cite: 6].
+* **Contexto:** A equipe de desenvolvimento possui apenas 15 pessoas e 1 especialista em conformidade. Adotar microsserviços puros traria alta complexidade operacional e overhead de DevOps. Contudo, partes do sistema possuem dinâmicas de carga e modelos de execução distintos.
+* **Decisão:** Adotar uma composição híbrida de estilos arquiteturais com delimitação explícita das seguintes fronteiras:
+  1. **Núcleo Transacional (Monolito Modular com Arquitetura Hexagonal):** Processa as operações síncronas dos domínios core (Prontuário, Farmácia, Regulação, Agendamento e Módulo LGPD) via chamadas *In-Process*.
+  2. **Fronteira Assíncrona via EDA (Event-Driven Architecture):** Delimitada na saída do Monolito por uma Outbox Transacional e um Relay Worker que publica eventos no Apache Kafka.
+  3. **Fronteira de Processamento de Dados (Pipes & Filters):** Executada por um Worker dedicado para validação FHIR e transmissão assíncrona com controle de SLA à RNDS.
+  4. **Fronteira Serverless:** Execuções técnicas pontuais acionadas por eventos para destruição de chaves no KMS e relatórios esporádicos.
 * **Alternativas Consideradas:**
-  * *Arquitetura de Microsserviços Puros:* Descartada devido ao alto custo de infraestrutura e sobrecarga de governança/DevOps desproporcional ao tamanho do time (15 devs).
-  * *Monolito Tradicional (Camadas N-Tier sem isolamento modular):* Descartado por criar alto risco de acoplamento de código e impossibilitar a substituição futura do legado e a segregação de auditoria.
+  * *Arquitetura de Microsserviços Puros:* Descartada devido à alta complexidade de implantação e governança incompatível com o tamanho da equipe (15 devs).
+  * *Monolito Tradicional (N-Tier sem separação modular):* Descartado por favorecer o acoplamento descontrolado do código e inviabilizar a transição gradual do sistema legado.
 * **Consequências Positivas:**
-  * Baixa complexidade de implantação do Core com isolamento claro de domínios.
-  * Fronteiras rígidas e documentadas onde termina o código síncrono e começa o fluxo assíncrono[cite: 6].
+  * Baixa complexidade de implantação e manutenção do núcleo do sistema.
+  * Fronteiras claras delimitando a transição entre execuções síncronas e assíncronas.
 * **Consequências Negativas:**
-  * Requer disciplina do time para manter a separação dos módulos no monolito e não violar as fronteiras de dados.
+  * Exige disciplina no *Code Review* para manter a separação dos módulos internos no monolito.
 
 ---
-### ADR 02: Gestão de Dados – Criptografia Envelope com Destruição de Chaves para LGPD vs. Auditoria Imutável
 
-* **Status:** Aprovado
-* **Contexto:** Legislações de saúde exigem guarda imutável de prontuários e acessos por 20 anos. Por outro lado, a LGPD garante ao cidadão o direito à anonimização/expurgo de dados pessoais PII. Alterar registos na base imutável quebraria a integridade da auditoria.
-* **Decisão:** Implementar **Criptografia Envelope (*Envelope Encryption*)** gerenciada por um KMS (Key Management System). Cada paciente possui uma Data Encryption Key (DEK) individual. Os logs e prontuários armazenam os dados PII cifrados. Ao receber uma solicitação válida de expurgo sob a LGPD, a chave DEK do paciente é irreversivelmente destruída (**Crypto-shredding**).
+### ADR 02 (Revisado): Gestão de Dados – Classificação por Base Legal e Crypto-Shredding
+
+* **Status:** Aprovado (Substitui o ADR 02 original)
+* **Contexto:** A legislação sanitária (Lei 13.787/2018 e CFM) exige a guarda imutável de prontuários por 20 anos. Por outro lado, a LGPD concede ao cidadão o direito ao expurgo de dados pessoais. O expurgo genérico sobre prontuários dentro do prazo legal violaria obrigações regulatórias.
+* **Decisão:**
+  1. **Classificação por Base Legal:** Dados sob obrigação legal de guarda (prontuários, dispensações e notificações) não sofrem *crypto-shredding* durante o prazo legal de 20 anos. Pedidos de expurgo nesses casos recebem resposta fundamentada no Art. 16, I da LGPD.
+  2. **Crypto-Shredding Restrito:** O *crypto-shredding* (destruição da DEK no KMS) é aplicado estritamente a dados tratados sob consentimento e para a eliminação definitiva de prontuários após o vencimento do prazo prescricional de 20 anos.
+  3. **Pseudônimos Estáveis na Trilha:** Os eventos de auditoria gravam um identificador pseudônimo estável do paciente (desvinculado da DEK), garantindo que a trilha de acessos continue consultável por auditores mesmo após o eventual expurgo dos dados PII diretos.
 * **Alternativas Consideradas:**
-  * *Apagar/Atualizar diretamente os registros na base (*Hard Delete*):* Descartado por violar a imutabilidade do repositório de auditoria e inviabilizar a reconstrução histórica exigida pelos órgãos reguladores.
-  * *Mascaramento de Dados via Anonymization SQL Scripts:* Descartado por alto risco de falha humana e impossibilidade de aplicar em bancos imutáveis *Append-Only* como EventStoreDB.
+  * *Crypto-Shredding Irrestrito em Todos os Prontuários:* Descartado por violar a obrigação legal de guarda de 20 anos e impossibilitar a auditoria sanitária.
+  * *Hard Delete em Tabelas Relacionais:* Descartado por violar a imutabilidade do repositório de auditoria.
 * **Consequências Positivas:**
-  * Atende 100% à exigência legal de auditoria imutável por 20 anos e à conformidade LGPD.
-  * O expurgo do dado torna-se uma operação instantânea no KMS.
+  * Conformidade integral com a Lei de Prontuários Eletrônicos e com a LGPD.
+  * Preservação da auditabilidade do histórico de acessos através de pseudônimos.
 * **Consequências Negativas:**
-  * *Overhead* computacional para cifrar e decifrar dados sensíveis em runtime.
-  * Alta dependência da disponibilidade e segurança do serviço KMS.
+  * Necessidade de validação jurídica/conformidade prévia para cada solicitação de expurgo no Módulo LGPD.
 
 ---
-### ADR 03: Integração com Legado/Terceiros – Padrão Adapter e Ingestão Assíncrona via Pipes & Filters
 
-* **Status:** Aprovado
-* **Contexto:** O sistema precisa integrar-se com o Sistema Legado de Regulação durante uma transição de 2 anos e transmitir notificações compulsórias ao Ministério da Saúde em até 24h, superando instabilidades nas redes de 70 UBSs.
-* **Decisão:** Adotar o padrão **Adapter (Portas e Adaptadores)** para isolar as chamadas REST/SQL ao sistema legado e a arquitetura **Pipes & Filters (Dutos e Filtros)** conectada ao Barramento de Eventos para a ingestão e envio assíncrono das notificações compulsórias ao Ministério da Saúde.
+### ADR 03 (Revisado): Ingestão de Notificações Compulsórias e Prazos da Vigilância
+
+* **Status:** Aprovado (Substitui o ADR 03 original)
+* **Contexto:** O sistema precisa transmitir Notificações Compulsórias ao Ministério da Saúde (RNDS) no prazo impreterível de 24 horas, superando instabilidades nas redes de 70 UBSs. A vigilância epidemiológica exige a identificação do paciente para ações de contenção sanitária.
+* **Decisão:** Adotar a arquitetura **Pipes & Filters (Dutos e Filtros)** acoplada ao Apache Kafka com as seguintes regras:
+  1. **Remoção da Anonimização:** A etapa de anonimização é removida do pipeline epidemiológico (respaldada pelo Art. 11, II da LGPD - tutela da saúde).
+  2. **Relógio de SLA de 24 Horas:** O prazo de 24h é contado rigidamente a partir do *timestamp* do atendimento de origem.
+  3. **Alertas e Contingência:** Emissão de alerta preventivo com 12h de atraso e acionamento de canal de contingência manual auditado antes do vencimento do prazo.
 * **Alternativas Consideradas:**
-  * *Integração Direta via Chamadas Síncronas (HTTP REST):* Descartada porque indisponividades no Ministério da Saúde ou falhas de internet na UPA travavam o fluxo de atendimento médico.
-  * *Acesso Direto ao Banco de Dados do Sistema Legado:* Descartado por alto risco de corrupção de dados e acoplamento com a estrutura da base antiga.
+  * *Anonimização de Notificações Epidemiológicas:* Descartada por inviabilizar o trabalho da vigilância sanitária em identificar e isolar surtos.
+  * *Integração Síncrona Direta HTTP:* Descartada pois indisponividades federais travavam o atendimento médico nas UPAs.
 * **Consequências Positivas:**
-  * Permite o desligamento do sistema legado ao fim de 24 meses apenas removendo o Adaptador.
-  * Tolerância a falhas: a indisponibilidade do sistema federal não interrompe a operação local e garante o envio dentro das 24 horas via *Retries*.
+  * Cumprimento garantido do prazo regulatório com rastreabilidade de SLA.
+  * Pleno atendimento às necessidades da vigilância epidemiológica.
 * **Consequências Negativas:**
-  * Exige monitorização ativa e gestão de filas de mensagens com falhas (*Dead Letter Queue*).
+  * Necessidade de gestão de alertas operacionais e monitoramento de Dead Letter Queues (DLQ).
 
 ---
-### ADR 04: Operação e Implantação – Infraestrutura Cloud Híbrida com Buffer Local em UBSs
 
-* **Status:** Aprovado
-* **Contexto:** A plataforma central opera em nuvem, mas 70 Unidades Básicas de Saúde (UBSs) sofrem com conexões de internet instáveis. Os atendimentos médicos e triagens não podem ser paralisados por queda de rede.
-* **Decisão:** Adotar uma arquitetura de **Buffer Local (*Offline-first / Store and Forward*)** nas UBSs. A aplicação web/local grava as transações emergenciais num armazenamento local (IndexedDB no navegador / SQLite local) durante a indisponibilidade e retransmite-as assincronamente para a nuvem assim que a conectividade for restabelecida.
+### ADR 04 (Revisado): Operação Offline-First e Políticas de Cache em UBS/UPA
+
+* **Status:** Aprovado (Substitui o ADR 04 original)
+* **Contexto:** As 70 UBSs e 5 UPAs enfrentam perdas frequentes de conectividade. Contudo, armazenar históricos completos de prontuários em navegadores locais gera graves riscos de vazamento de PII.
+* **Decisão:** Implementar a arquitetura **Offline-First com Buffer Local** com políticas segregadas:
+  1. **Unidades Básicas de Saúde (UBS):** Cache local restrito estritamente aos pacientes agendados no dia. Chaves DEK em cache com TTL curto, descartadas imediatamente após a sincronização.
+  2. **Unidades de Pronto Atendimento (UPA):** Sem pré-carga de prontuários devido à demanda espontânea. O atendimento corrente é registrado localmente em um log *append-only* encadeado por hash e sincronizado assim que a conexão retorna.
+  3. **Trilha de Origem:** Transações offline entram no repositório central marcadas com a origem offline e seu *timestamp* original.
 * **Alternativas Consideradas:**
-  * *Dependência Exclusiva de Conectividade Cloud (Online-only):* Descartada devido à inviabilidade operacional nas 70 UBSs com instabilidade de rede recorrente.
-  * *Servidores Locais Completos em cada UBS (Full On-Premise):* Descartado pelo custo elevado de hardware, manutenção presencial e complexidade de sincronização bidirecional completa.
+  * *Pré-carga Global de Prontuários na UPA:* Descartada pelo risco inaceitável de vazamento de dados PII em navegadores locais.
+  * *Operação 100% Online:* Descartada pela inviabilidade prática de paralisar atendimentos durante quedas de link.
 * **Consequências Positivas:**
-  * Alta resiliência: atendimento contínuo mesmo durante quedas longas de internet.
-  * Otimização do uso de banda de rede.
+  * Continuidade do atendimento médico sem expor históricos clínicos desnecessários em cache local.
+  * Rastreabilidade e integridade dos registros gerados offline via log encadeado.
 * **Consequências Negativas:**
-  * Necessidade de gerir algoritmos de resolução de conflitos de dados no momento da sincronização.
+  * Durante a perda de rede na UPA, o médico não tem acesso ao histórico anterior do paciente.
 
 ---
-### ADR 05: Decisão Mais Arriscada – Segregação Estrutural entre Banco Transacional Central e Store Imutável de Auditoria
 
-* **Status:** Aprovado
-* **Contexto:** O sistema lida com alto volume transacional concorrente. Gravar audit trails detalhados no mesmo banco operacional (OLTP) por 20 anos causa degradação acentuada de I/O, *locks* de tabela e gargalos severos de desempenho no atendimento das UPAs.
-* **Decisão:** **Segregação Física de Armazenamento:** utilizar um banco de dados relacional transacional (PostgreSQL) focado no estado atual da aplicação e um repositório imutável *Append-Only* dedicado (EventStoreDB / PostgreSQL particionado) para auditoria e *Event Sourcing*, sincronizados assincronamente via barramento de eventos.
+### ADR 05 (Revisado): Segregação de Banco Transacional e Store Imutável com Outbox Transacional e WORM
+
+* **Status:** Aprovado (Substitui o ADR 05 original)
+* **Contexto:** Registrar a trilha detalhada de acessos diretamente no banco operacional (OLTP) degrada severamente a performance. Por outro lado, enviar auditorias via chamadas assíncronas simples cria risco de *Dual Write* e perda de mensagens.
+* **Decisão:**
+  1. **Outbox Transacional:** Todas as leituras e escritas auditáveis gravam o evento na tabela `outbox` do banco `dbCore` dentro da mesma transação SQL local (*Fail-Closed*).
+  2. **Log de Auditoria com Eventos de Estado Completo:** A gravação na Outbox emite o estado completo da alteração (valores antes e depois, prescrição, dose, lote).
+  3. **Armazenamento Imutável WORM:** Os eventos são consumidos do Kafka e armazenados em um **PostgreSQL Particionado Append-Only**, onde o hash de fechamento de cada lote diário é persistido em armazenamento WORM (Object Lock em modo compliance).
 * **Alternativas Consideradas:**
-  * *Banco de Dados Único com Tabelas de Trilha/Auditoria:* Descartado pelo elevado risco de degradação da performance transacional das UPAs e custos massivos de armazenamento em discos de alta velocidade.
-  * *Auditoria via Text Logs (Arquivos de Log puros em S3):* Descartado por dificultar consultas estruturadas exigidas por auditores e órgãos fiscalizadores.
+  * *Event Sourcing Estrito em Todo o Sistema:* Descartado pela complexidade de projeções, versionamento de eventos e replay sobre a equipe de 15 devs.
+  * *EventStoreDB como Banco Adicional:* Descartado para não adicionar mais uma tecnologia de banco à carga de trabalho da equipe.
 * **Consequências Positivas:**
-  * Excelente performance e baixo tempo de resposta nas operações clínicas críticas das UPAs/UBSs.
-  * Guarda imutável, estruturada e otimizada por 20 anos no repositório dedicado.
-* **Consequências Negativas (Risco Elevado):**
-  * *Consistência Eventual:* Risco temporário de um atendimento ser persistido no banco operacional, mas o registro de auditoria demorar alguns segundos para ser refletido no *Store Imutável*.
-  * Exige mecanismos rigorosos de auditoria de mensagens e *re-drive* para garantir perda zero de eventos.
+  * Eliminação total do problema de *Dual Write* e garantia de não-repúdio nas leituras de prontuário.
+  * Imutabilidade garantida por hardware/storage WORM e cadeia de hashes.
+* **Consequências Negativas:**
+  * Pequeno overhead de escrita na tabela de Outbox durante as transações operacionais.
 
+---
+
+### ADR 06 (NOVO): Regulação de Leitos com Máquina de Estados e Decoupling Transacional
+
+* **Status:** Aprovado (Novo ADR)
+* **Contexto:** Reter locks pessimistas ou distribuídos no banco local durante chamadas HTTP síncronas ao sistema legado de regulação provoca contenção de conexões, travamento de leitos e risco de reservas fantasmas em caso de timeout.
+* **Decisão:**
+  1. **Desacoplamento de Locks HTTP:** Fica proibida a retenção de travas de banco durante chamadas externas ao legado.
+  2. **Máquina de Estados de Reserva:** A reserva de leito adota os estados `SOLICITADA` → `PENDENTE_LEGADO` → `CONFIRMADA`/`RECUSADA`.
+  3. **Resolução Local Concorrente:** Duas unidades disputando o mesmo leito têm a concorrência resolvida por uma transação curta no banco local (constraint de unicidade/versão). Apenas a unidade que obter o estado `PENDENTE_LEGADO` invoca o sistema legado.
+  4. **Autoridade do Leito:** O legado detém a autoridade sobre o leito apenas durante a fase de transição; após a migração daquele leito, a autoridade passa a ser 100% nativa do núcleo.
+* **Alternativas Consideradas:**
+  * *Lock Pessimista Mantido Durante Chamada HTTP ao Legado:* Descartado pelo risco de travar o banco e gerar inconsistências em caso de timeout de rede.
+* **Consequências Positivas:**
+  * Desempenho transacional e eliminação de gargalos no gerenciamento de leitos.
+  * Tratamento resiliente de timeouts através de reconciliação assíncrona por chave de idempotência.
+* **Consequências Negativas:**
+  * Necessidade de gerenciar a máquina de estados e rotinas de reconciliação de reservas pendentes.
+    
 ---
 
 # 4. Respostas às Perguntas Obrigatórias do Caso:
 
 ### 1. Como a UPA continua triando e atendendo com a internet fora do ar, e o que acontece quando ela volta?
 
-* **Resposta:** A UPA utiliza uma arquitetura **Offline-First com Buffer Local (*Store and Forward*)**. Durante a queda de conectividade, a aplicação armazena localmente em cache/banco local (IndexedDB no navegador ou SQLite local) os dados de triagem e atendimento. Quando a conexão restabelece, o agente de sincronização dispara o envio assíncrono dos eventos acumulados para o **Barramento de Eventos (Kafka)** na nuvem. A reconciliação ocorre ordenando os eventos pelo *timestamp* original do atendimento e aplicando regras de resolução de conflitos para garantir a consistência no **Banco Transacional Central**.
+* **Resposta:** A UPA utiliza a arquitetura **Offline-First com Buffer Local**. Por se tratar de atendimento de demanda espontânea, a UPA opera sem pré-carga de prontuários históricos em cache para evitar vazamentos de dados pessoais em navegadores. Durante a queda de rede, a aplicação registra os atendimentos correntes em um log local encadeado por hash (*IndexedDB*). Cada registro recebe um UUID e *timestamp* original do atendimento. Ao restabelecer a conexão, o agente de sincronização descarrega os eventos acumulados no **Apache Kafka**. A reconciliação ordena os eventos pelo *timestamp* de origem e persiste as transações no **Banco Transacional Central**, marcando a origem offline na trilha.
 * **Sustentado por:**
-  * **Diagramas C4:** Nível 2 (Componentes *Serverless Worker* e *Barramento de Eventos*).
-  * **ADRs:** ADR 04 (Operação e Implantação – Infraestrutura Cloud Híbrida com Buffer Local).
+  * **Diagramas C4:** Nível 2 (Componentes *Portal Web / SPA Offline-First* e *Barramento de Eventos*).
+  * **ADRs:** ADR 04 (Operação e Implantação – Operação Offline-First e Políticas de Cache em UBS/UPA).
 
 ---
+
 ### 2. Como duas unidades disputando o mesmo leito nunca conseguem reservá-lo ao mesmo tempo, com o sistema legado ainda no circuito?
 
-* **Resposta:** A reserva única é garantida pelo **Módulo de Regulação de Leitos** através de **Bloqueio Pessimista Transacional (*Pessimistic Locking*)** ou **Locks Distribuídos** no banco central. Quando uma unidade solicita o leito, a transação obtém uma trava exclusiva sobre o ID do leito antes de invocar o **Sistema Legado de Regulação** através do **Adaptador do Sistema Legado (Padrão Adapter)**. A confirmação do legado encerra a transação. Caso outra unidade tente o mesmo leito simultaneamente, a requisição fica bloqueada até a liberação do lock, recebendo em seguida a notificação de leito indisponível.
+* **Resposta:** A disputa é resolvida pelo **Módulo de Regulação de Leitos** através de uma **Máquina de Estados** e travas transacionais curtas no banco local. Ao solicitar o leito, o sistema tenta transicionar o estado do leito para `PENDENTE_LEGADO` via uma transação rápida no **PostgreSQL Transacional**. Apenas a unidade que obtiver êxito nessa transação local dispara a chamada HTTP ao **Sistema Legado de Regulação** através do **legadoAdapter**, utilizando uma chave de idempotência. Se outra unidade tentar a mesma vaga simultaneamente, a transação local rejeita o pedido imediatamente, eliminando a retenção de travas de banco durante chamadas externas.
 * **Sustentado por:**
-  * **Diagramas C4:** Nível 2 (Integração entre *Core Monolith* e *Sistema Legado* via REST) e Nível 3 (Componentes *Módulo de Regulação* e *Adaptador do Sistema Legado*).
-  * **ADRs:** ADR 03 (Integração com Legado/Terceiros) e ADR 05 (Decisão Mais Arriscada - Banco Transacional Central com Locking).
+  * **Diagramas C4:** Nível 2 (*Core Monolith* e *Sistema Legado*) e Nível 3 (*Módulo de Regulação de Leitos* e *legadoAdapter*).
+  * **ADRs:** ADR 03 (Integração com Legado) e ADR 06 (Regulação de Leitos com Máquina de Estados e Decoupling Transacional).
 
 ---
+
 ### 3. Como o prontuário garante que se saiba quem acessou cada registro, e como convive a guarda de 20 anos com os direitos do paciente sob a LGPD?
 
-* **Resposta:** O rastreamento de acessos é garantido pelo **Serviço de Event Sourcing / Auditoria**, que intercepta leituras e escritas via **Adaptador de Auditoria** e grava eventos imutáveis em repositório dedicado (**EventStoreDB/PostgreSQL Append-Only**) por 20 anos. Para cumprir a LGPD (direito ao esquecimento/expurgo), utiliza-se **Criptografia Envelope com *Crypto-shredding***: os dados PII são cifrados com chave individual mantida no **KMS**. Ao processar o expurgo LGPD, a chave do paciente é destruída no KMS. O log imutável permanece íntegro para fiscalização regulatória, contudo os dados do prontuário tornam-se indecifráveis/anonimizados.
+* **Resposta:** Qualquer leitura ou escrita no prontuário grava obrigatoriamente um registro de acesso na tabela `outbox` do banco de dados operacional dentro da mesma transação SQL (*Fail-Closed*). O **Relay Worker** publica o evento no **Kafka**, que é persistido no **Store Imutável de Auditoria (PostgreSQL Particionado + WORM)** com pseudônimos estáveis do paciente, garantindo a rastreabilidade por 20 anos. Quanto à LGPD, o **Módulo LGPD** classifica os dados por base legal: prontuários sob obrigação sanitária de guarda de 20 anos não sofrem expurgo (Art. 16, I da LGPD). O *crypto-shredding* (destruição da chave no KMS) é aplicado estritamente a dados tratados por consentimento e ao fim do prazo prescricional de 20 anos.
 * **Sustentado por:**
-  * **Diagramas C4:** Nível 2 (Interação entre *Barramento de Eventos*, *Serviço de Auditoria*, *Store Imutável* e *KMS*) e Nível 3 (Componentes *Adaptador de Auditoria* e *Adaptador de Criptografia LGPD*).
-  * **ADRs:** ADR 02 (Gestão de Dados – Criptografia Envelope com Destruição de Chaves) e ADR 05 (Separação do Store Imutável).
+  * **Diagramas C4:** Nível 2 (*Outbox Transacional*, *Serviço de Auditoria* e *KMS*) e Nível 3 (*Módulo LGPD*, *auditAdapter* e *cryptoAdapter*).
+  * **ADRs:** ADR 02 (Classificação por Base Legal e Crypto-Shredding) e ADR 05 (Outbox Transacional e Store WORM).
 
 ---
+
 ### 4. Como a notificação compulsória chega à vigilância em até 24 horas mesmo se o sistema federal estiver indisponível?
 
-* **Resposta:** A notificação é processada via **Pipes & Filters (Dutos e Filtros)** de forma assíncrona. Ao registrar um diagnóstico compulsório, o evento é publicado no **Barramento de Eventos (Kafka)**. O **Pipeline Worker** consome a mensagem, valida, anonimiza e tenta a transmissão via HTTPS/mTLS para o sistema do Ministério da Saúde (e-SUS/RNDS). Em caso de indisponibilidade federal, o worker aplica **Retentativas com Backoff Exponencial** utilizando filas de espera (*Retry Queues*). As mensagens permanecem persistidas na fila e são entregues automaticamente quando o serviço federal reestabelece a operação, cumprindo o prazo legal de 24 horas.
+* **Resposta:** A notificação é processada via **Pipes & Filters** desacoplados. Ao registrar um diagnóstico compulsório, a Outbox publica o evento no **Kafka**. O **Pipeline Worker** consome a mensagem, valida a estrutura FHIR (sem anonimizar o paciente, respaldado pela tutela da saúde) e tenta o envio à RNDS. O sistema mantém um relógio de SLA contado a partir do *timestamp* do atendimento de origem. Se o serviço federal estiver fora do ar, o worker aplica retentativas com backoff exponencial. Se a indisponibilidade atingir 12 horas, um alerta preventivo é enviado à vigilância municipal; antes de completar 24 horas, aciona-se um canal de contingência manual auditado.
 * **Sustentado por:**
-  * **Diagramas C4:** Nível 2 (Conexão assíncrona entre *EventBus*, *Pipeline Worker* e *Sistemas Federais / MS*).
-  * **ADRs:** ADR 03 (Integração com Legado/Terceiros – Ingestão Assíncrona via Pipes & Filters).
+  * **Diagramas C4:** Nível 2 (*EventBus*, *Pipeline Worker* e *Sistemas Federais / MS*).
+  * **ADRs:** ADR 03 (Ingestão de Notificações Compulsórias e Prazos da Vigilância).
 
 ---
+
 ### 5. Como o sistema legado de regulação é substituído aos poucos sem interromper o serviço?
 
-* **Resposta:** A substituição gradual utiliza o padrão **Strangler Fig (Estrangulamento)** através de **Arquitetura Hexagonal (Ports & Adapters)**. Inicialmente, as operações passam pelo **Adaptador do Sistema Legado**, que traduz requisições para o sistema antigo. Conforme os componentes de regulação são desenvolvidos nativamente no **Módulo de Regulação de Leitos**, o tráfego é redirecionado via *Feature Toggles*. Ao final do ciclo de 24 meses, após a migração dos dados históricos, o adaptador é desativado e o legado desligado sem interrupção do serviço.
+* **Resposta:** A substituição gradual adota o padrão **Strangler Fig (Estrangulamento)** combinado com a transferência de autoridade por leito. Inicialmente, o **Módulo de Regulação de Leitos** delega a autoridade do leito ao sistema antigo através do `legadoAdapter`. Conforme os leitos e unidades são migrados nativamente para a nova plataforma, a autoridade do leito passa a ser do núcleo e o adaptador passa a operar apenas em modo de consulta histórica via *Feature Toggles*. Ao final dos 24 meses, o adaptador é desativado e o legado desligado sem qualquer impacto operacional.
 * **Sustentado por:**
-  * **Diagramas C4:** Nível 2 (Relação temporária entre *Core Monolith* e *Sistema Legado*) e Nível 3 (*Módulo de Regulação* encapsulando o *Adaptador do Legado*).
-  * **ADRs:** ADR 01 (Estrutura Geral – Arquitetura Hexagonal) e ADR 03 (Integração com Legado/Terceiros – Padrão Adapter e Strangler Fig).
+  * **Diagramas C4:** Nível 2 (*Core Monolith* e *Sistema Legado*) e Nível 3 (*Módulo de Regulação de Leitos* e *legadoAdapter*).
+  * **ADRs:** ADR 01 (Estrutura Geral), ADR 03 (Padrão Adapter) e ADR 06 (Máquina de Estados e Autoridade do Leito).
