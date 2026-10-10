@@ -12,7 +12,7 @@ Este documento registra todas as modificações, refatorações e reestruturaç�
 
 ---
 
-## 1. Alterações Detalhadas por Artefato
+## 1. Alterações Detalhadas por Artefato:
 
 ### 1.1. Registros de Decisão Arquitetural (`2-arquitetura/ADRs/`)
 
@@ -107,7 +107,7 @@ Este documento registra todas as modificações, refatorações e reestruturaç�
 
 ---
 
-## 2. Correções Internas Adicionais (Auto-Revisão)
+## 2. Correções Internas Adicionais (Auto-Revisão):
 
 Durante o processo de reestruturação, foram identificadas e corrigidas as seguintes inconsistências internas no repositório:
 
@@ -118,7 +118,7 @@ Durante o processo de reestruturação, foram identificadas e corrigidas as segu
 
 ---
 
-## 3. Matriz de Objeções e Ações Aplicadas
+## 3. Matriz de Objeções e Ações Aplicadas:
 
 | Objeção | Posição | Artefatos Afetados | Resumo da Ação |
 | :--- | :--- | :--- | :--- |
