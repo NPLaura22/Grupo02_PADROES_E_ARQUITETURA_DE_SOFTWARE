@@ -1,0 +1,26 @@
+# Entrega 5 (Final) — Consolidação da Arquitetura e Resposta à Leitura Cruzada
+
+## 📌 Visão Geral
+Este diretório reúne o artefato final da disciplina de Arquitetura de Software. Ele consolida a revisão completa do repositório do **Grupo 02 (Saúde — Envelope E)** após a etapa de leitura cruzada e debate com o **Grupo 04**.
+
+A partir das nove objeções recebidas, o grupo reavaliou as premissas de projeto, corrigiu incoerências conceituais, ajustou a classificação legal da retenção de dados e aprofundou as decisões de engenharia para entregar uma solução robusta, auditável e viável para uma equipe de 15 desenvolvedores e 1 especialista em conformidade.
+
+---
+
+## 📂 Estrutura do Repositório Revisado
+
+O repositório foi atualizado de forma integrada em todos os seus artefatos:
+
+├── 1-matriz/
+│   └── matriz.md               # Avaliação dos 12 estilos arquiteturais alinhada às decisões finais
+│   └── README.md               # Documentação matriz
+├── 2-arquitetura/
+│   └── documento_de_arquitetura.md # Documento C4 (Níveis 1, 2 e 3), Mapa de Restrições, ADRs (01 a 06) e Respostas
+│   └── README.md               # Documentação arquitetura
+├── 3-spike/
+│   ├── exemplo.py              # Prova de conceito funcional focada no domínio de Saúde (Outbox + Reconstrução)
+│   ├── README.md               # Documentação da spike técnica e diagrama do recorte testado
+│   └── saida-esperada.txt      # Saída determinística do teste da spike
+└── 5-final/
+    ├── CHANGELOG.md            # Registro detalhado das objeções, fundamentações e alterações aplicadas
+    └── README.md               # Este documento de síntese e conclusão do trabalho
